@@ -1,189 +1,251 @@
-import { useState, useRef, useEffect } from "react";
-import Head from "next/head";
+import { useState, useRef, useEffect, useCallback } from 'react';
+import Head from 'next/head';
+import { AnimatePresence, motion } from 'framer-motion';
+import Sidebar from '../components/Sidebar';
+import MessageBubble from '../components/MessageBubble';
+import SettingsModal from '../components/SettingsModal';
 
-const EMOJI_REACTIONS = ["👍", "❤️", "😂", "🔥", "🤯", "👏"];
+/* ─── Helpers ──────────────────────────────────────────────────────── */
+const genId = () => Math.random().toString(36).slice(2, 10);
 
-const formatTime = (ts) =>
-  new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-
-const TypingDots = () => (
-  <div style={{ display: "flex", gap: 5, padding: "14px 18px", alignItems: "center" }}>
-    {[0, 1, 2].map((i) => (
-      <div key={i} style={{
-        width: 7, height: 7, borderRadius: "50%",
-        background: "linear-gradient(135deg, #f59e0b, #ef4444)",
-        animation: `typingBounce 1.4s ease-in-out ${i * 0.16}s infinite`,
-      }} />
-    ))}
-  </div>
-);
-
-const CopyBtn = ({ text }) => {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
-  return (
-    <button onClick={copy} title="Copy" style={{
-      background: "transparent", border: "none", cursor: "pointer",
-      color: copied ? "#34d399" : "rgba(255,255,255,0.3)",
-      fontSize: 15, padding: "3px 6px", borderRadius: 4, transition: "color 0.2s",
-    }}>
-      {copied ? "✓" : "⎘"}
-    </button>
-  );
+const makeTitle = (text) => {
+  const clean = text.trim().replace(/\n/g, ' ');
+  return clean.length > 36 ? clean.slice(0, 36) + '…' : clean;
 };
 
-const Message = ({ msg, isNew, onReact }) => {
-  const isUser = msg.role === "user";
-  const [showActions, setShowActions] = useState(false);
-  const [showEmojis, setShowEmojis] = useState(false);
+const STORAGE_KEY = 'nova_v2_conversations';
 
+const loadConversations = () => {
+  if (typeof window === 'undefined') return [];
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+  } catch {
+    return [];
+  }
+};
+
+const saveConversations = (convs) => {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(convs));
+  } catch {}
+};
+
+const SUGGESTIONS = [
+  { icon: '🎲', text: 'Tell me something surprising' },
+  { icon: '💡', text: 'Give me a creative idea' },
+  { icon: '🌍', text: 'Explain quantum entanglement simply' },
+  { icon: '✍️', text: 'Write a haiku about the future of AI' },
+];
+
+/* ─── Typing Indicator ─────────────────────────────────────────────── */
+function TypingIndicator() {
   return (
-    <div
-      onMouseEnter={() => setShowActions(true)}
-      onMouseLeave={() => { setShowActions(false); setShowEmojis(false); }}
-      style={{
-        display: "flex", flexDirection: "column",
-        alignItems: isUser ? "flex-end" : "flex-start",
-        marginBottom: 22,
-        animation: isNew ? "msgIn 0.35s cubic-bezier(0.34,1.56,0.64,1)" : "none",
-      }}
+    <motion.div
+      className="msg-row assistant"
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 10 }}
+      transition={{ duration: 0.2 }}
     >
-      <div style={{ display: "flex", alignItems: "flex-end", gap: 10, flexDirection: isUser ? "row-reverse" : "row" }}>
-        {/* Avatar */}
-        <div style={{
-          width: 34, height: 34, borderRadius: "50%", flexShrink: 0,
-          background: isUser ? "linear-gradient(135deg, #1e293b, #334155)" : "linear-gradient(135deg, #f59e0b, #ef4444)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          fontSize: 15, boxShadow: isUser ? "none" : "0 0 16px rgba(245,158,11,0.4)",
-          border: isUser ? "1px solid rgba(255,255,255,0.1)" : "none",
-        }}>
-          {isUser ? "🧑" : "✦"}
-        </div>
-
-        {/* Bubble */}
-        <div style={{ maxWidth: "68%", position: "relative" }}>
-          <div style={{
-            padding: "13px 17px",
-            borderRadius: isUser ? "18px 18px 4px 18px" : "18px 18px 18px 4px",
-            background: isUser ? "linear-gradient(135deg, #1d4ed8, #2563eb)" : "rgba(255,255,255,0.07)",
-            border: isUser ? "none" : "1px solid rgba(255,255,255,0.1)",
-            color: "#f8fafc", fontSize: 14, lineHeight: 1.65,
-            boxShadow: isUser ? "0 4px 24px rgba(37,99,235,0.35)" : "0 2px 16px rgba(0,0,0,0.25)",
-            backdropFilter: "blur(12px)",
-            whiteSpace: "pre-wrap", wordBreak: "break-word",
-          }}>
-            {msg.content}
-          </div>
-
-          {msg.reactions && msg.reactions.length > 0 && (
-            <div style={{
-              position: "absolute", bottom: -16,
-              ...(isUser ? { left: 0 } : { right: 0 }),
-              display: "flex", gap: 3,
-            }}>
-              {msg.reactions.map((r, i) => (
-                <span key={i} style={{
-                  background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.15)",
-                  borderRadius: 10, padding: "1px 6px", fontSize: 13,
-                  backdropFilter: "blur(8px)",
-                }}>{r}</span>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Action buttons */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 4, opacity: showActions ? 1 : 0, transition: "opacity 0.15s" }}>
-          <CopyBtn text={msg.content} />
-          <button onClick={() => setShowEmojis(!showEmojis)} style={{
-            background: "transparent", border: "none", cursor: "pointer",
-            fontSize: 14, color: "rgba(255,255,255,0.3)", padding: "3px 5px",
-          }} title="React">😊</button>
+      <div className="msg-avatar nova-av">✦</div>
+      <div className="msg-bubble nova-bubble">
+        <div className="typing-indicator">
+          <div className="typing-dot" />
+          <div className="typing-dot" />
+          <div className="typing-dot" />
         </div>
       </div>
+    </motion.div>
+  );
+}
 
-      {showEmojis && (
-        <div style={{
-          display: "flex", gap: 6, marginTop: 8,
-          ...(isUser ? { marginRight: "44px" } : { marginLeft: "44px" }),
-          background: "rgba(10,12,22,0.95)", border: "1px solid rgba(255,255,255,0.12)",
-          borderRadius: 20, padding: "6px 12px",
-          backdropFilter: "blur(16px)", boxShadow: "0 8px 30px rgba(0,0,0,0.5)",
-          animation: "fadeIn 0.15s ease",
-        }}>
-          {EMOJI_REACTIONS.map((e) => (
-            <button key={e} onClick={() => { onReact(e); setShowEmojis(false); }} style={{
-              background: "none", border: "none", cursor: "pointer",
-              fontSize: 19, transition: "transform 0.15s", padding: 2,
-            }}
-              onMouseEnter={(ev) => ev.target.style.transform = "scale(1.35)"}
-              onMouseLeave={(ev) => ev.target.style.transform = "scale(1)"}
-            >{e}</button>
-          ))}
-        </div>
-      )}
-
-      <span style={{
-        fontSize: 10, color: "rgba(255,255,255,0.2)",
-        marginTop: msg.reactions?.length > 0 ? 22 : 7,
-        ...(isUser ? { marginRight: "44px" } : { marginLeft: "44px" }),
-        letterSpacing: 0.4,
-      }}>
-        {msg.sender} · {formatTime(msg.time)}
-      </span>
+/* ─── Aurora Background ────────────────────────────────────────────── */
+function AuroraBackground() {
+  return (
+    <div className="aurora-wrap">
+      <div className="aurora-blob aurora-blob-1" />
+      <div className="aurora-blob aurora-blob-2" />
+      <div className="aurora-blob aurora-blob-3" />
+      <div className="aurora-blob aurora-blob-4" />
+      <div className="aurora-blob aurora-blob-5" />
+      <div className="aurora-grid" />
     </div>
   );
-};
+}
 
+/* ─── Main Page ────────────────────────────────────────────────────── */
 export default function Home() {
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [newMsgIdx, setNewMsgIdx] = useState(null);
-  const [showClearConfirm, setShowClearConfirm] = useState(false);
-  const [charCount, setCharCount] = useState(0);
-  const MAX_CHARS = 500;
-  const bottomRef = useRef(null);
-  const inputRef = useRef(null);
+  const [conversations, setConversations] = useState([]);
+  const [activeId,      setActiveId]      = useState(null);
+  const [messages,      setMessages]      = useState([]);
+  const [input,         setInput]         = useState('');
+  const [isLoading,     setIsLoading]     = useState(false);
+  const [isStreaming,   setIsStreaming]   = useState(false);
+  const [newMsgIdx,     setNewMsgIdx]     = useState(null);
+  const [sidebarOpen,   setSidebarOpen]   = useState(true);
+  const [showSettings,  setShowSettings]  = useState(false);
+  const [searchQuery,   setSearchQuery]   = useState('');
+  const [charCount,     setCharCount]     = useState(0);
 
+  const MAX_CHARS   = 2000;
+  const abortRef    = useRef(null);
+  const bottomRef   = useRef(null);
+  const inputRef    = useRef(null);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+
+  /* ── Load from localStorage ── */
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
+    const saved = loadConversations();
+    setConversations(saved);
+    if (saved.length > 0) {
+      setActiveId(saved[0].id);
+      setMessages(saved[0].messages);
+    }
+    // Default sidebar open on desktop, closed on mobile
+    setSidebarOpen(window.innerWidth >= 768);
+  }, []);
 
-  const sendMessage = async () => {
-    const text = input.trim();
-    if (!text || loading || charCount > MAX_CHARS) return;
+  /* ── Persist to localStorage ── */
+  useEffect(() => {
+    if (conversations.length > 0) {
+      saveConversations(conversations);
+    }
+  }, [conversations]);
 
-    const userMsg = { role: "user", content: text, time: Date.now(), sender: "You", reactions: [] };
-    const updated = [...messages, userMsg];
-    setMessages(updated);
-    setNewMsgIdx(updated.length - 1);
-    setInput(""); setCharCount(0); setLoading(true);
-    if (inputRef.current) inputRef.current.style.height = "auto";
+  /* ── Auto-scroll ── */
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, isLoading]);
+
+  /* ── Sync messages into active conversation ── */
+  const syncMessages = useCallback((msgs, convId) => {
+    setConversations((prev) =>
+      prev.map((c) =>
+        c.id === convId ? { ...c, messages: msgs, updatedAt: Date.now() } : c
+      )
+    );
+  }, []);
+
+  /* ─── Conversation Management ─────────────────────────────────── */
+  const createNewChat = () => {
+    const id   = genId();
+    const conv = { id, title: 'New Chat', messages: [], createdAt: Date.now(), updatedAt: Date.now() };
+    setConversations((prev) => [conv, ...prev]);
+    setActiveId(id);
+    setMessages([]);
+    setInput(''); setCharCount(0);
+    if (window.innerWidth < 768) setSidebarOpen(false);
+    setTimeout(() => inputRef.current?.focus(), 100);
+  };
+
+  const selectConversation = (id) => {
+    const conv = conversations.find((c) => c.id === id);
+    if (!conv) return;
+    setActiveId(id);
+    setMessages(conv.messages);
+    setInput(''); setCharCount(0);
+    if (window.innerWidth < 768) setSidebarOpen(false);
+    setTimeout(() => inputRef.current?.focus(), 100);
+  };
+
+  const deleteConversation = (id) => {
+    setConversations((prev) => {
+      const next = prev.filter((c) => c.id !== id);
+      saveConversations(next);
+      return next;
+    });
+    if (id === activeId) {
+      const rest = conversations.filter((c) => c.id !== id);
+      if (rest.length > 0) {
+        setActiveId(rest[0].id);
+        setMessages(rest[0].messages);
+      } else {
+        setActiveId(null);
+        setMessages([]);
+      }
+    }
+  };
+
+  const renameConversation = (id, title) => {
+    setConversations((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, title } : c))
+    );
+  };
+
+  const clearAll = () => {
+    setConversations([]);
+    setActiveId(null);
+    setMessages([]);
+    localStorage.removeItem(STORAGE_KEY);
+  };
+
+  /* ─── Send / Stream ───────────────────────────────────────────── */
+  const sendMessage = async (overrideText) => {
+    const text = (overrideText !== undefined ? overrideText : input).trim();
+    if (!text || isLoading || charCount > MAX_CHARS) return;
+
+    // Ensure there's an active conversation
+    let convId = activeId;
+    if (!convId) {
+      const id   = genId();
+      const conv = { id, title: makeTitle(text), messages: [], createdAt: Date.now(), updatedAt: Date.now() };
+      setConversations((prev) => [conv, ...prev]);
+      setActiveId(id);
+      convId = id;
+    }
+
+    const userMsg = {
+      id: genId(), role: 'user', content: text,
+      time: Date.now(),
+    };
+
+    const updatedMsgs = [...messagesRef.current, userMsg];
+    setMessages(updatedMsgs);
+    setNewMsgIdx(updatedMsgs.length - 1);
+    setInput(''); setCharCount(0);
+    setIsLoading(true);
+    if (inputRef.current) inputRef.current.style.height = 'auto';
+
+    // Update conversation title from first user message
+    setConversations((prev) =>
+      prev.map((c) =>
+        c.id === convId && c.title === 'New Chat'
+          ? { ...c, title: makeTitle(text), messages: updatedMsgs, updatedAt: Date.now() }
+          : c.id === convId
+          ? { ...c, messages: updatedMsgs, updatedAt: Date.now() }
+          : c
+      )
+    );
+
+    abortRef.current = new AbortController();
 
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          messages: updated.map((m) => ({ role: m.role, content: m.content })),
+          messages: updatedMsgs.map((m) => ({ role: m.role, content: m.content })),
         }),
+        signal: abortRef.current.signal,
       });
 
       if (!res.ok) {
-        throw new Error(`API error: ${res.status}`);
+        const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        throw new Error(err.error || `HTTP ${res.status}`);
       }
 
-      const initialAssistantMsg = { role: "assistant", content: "", time: Date.now(), sender: "Nova", reactions: [] };
-      setMessages((prev) => [...prev, initialAssistantMsg]);
-      setNewMsgIdx(updated.length);
+      // Create assistant placeholder
+      const assistantMsg = { id: genId(), role: 'assistant', content: '', time: Date.now() };
+      const withAssistant = [...updatedMsgs, assistantMsg];
+      setMessages(withAssistant);
+      setNewMsgIdx(withAssistant.length - 1);
+      setIsLoading(false);
+      setIsStreaming(true);
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder("utf-8");
+      // Read stream
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
       let done = false;
 
       while (!done) {
@@ -192,198 +254,278 @@ export default function Home() {
         if (value) {
           const chunk = decoder.decode(value, { stream: true });
           setMessages((prev) => {
-            const newMsgs = [...prev];
-            const lastIdx = newMsgs.length - 1;
-            newMsgs[lastIdx] = { ...newMsgs[lastIdx], content: newMsgs[lastIdx].content + chunk };
-            return newMsgs;
+            const next    = [...prev];
+            const lastIdx = next.length - 1;
+            next[lastIdx] = { ...next[lastIdx], content: next[lastIdx].content + chunk };
+            return next;
           });
         }
       }
-    } catch (error) {
-      setMessages((prev) => {
-        // If we already added the assistant message placeholder, update it
-        if (prev.length > updated.length) {
-          const newMsgs = [...prev];
-          newMsgs[newMsgs.length - 1].content = "⚠️ Connection error. Please try again.";
-          return newMsgs;
-        }
-        return [...updated, { role: "assistant", content: "⚠️ Connection error. Please try again.", time: Date.now(), sender: "Nova", reactions: [] }];
+
+      // Persist final messages
+      setMessages((final) => {
+        syncMessages(final, convId);
+        return final;
       });
+
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        // User stopped — keep whatever was streamed
+        setMessages((current) => {
+          syncMessages(current, convId);
+          return current;
+        });
+      } else {
+        const errMsg = {
+          id: genId(), role: 'assistant',
+          content: `⚠️ **Error:** ${err.message}\n\nPlease try again.`,
+          time: Date.now(),
+        };
+        setMessages((prev) => {
+          const withErr = prev.length > updatedMsgs.length
+            ? prev.map((m, i) => i === prev.length - 1 ? errMsg : m)
+            : [...prev, errMsg];
+          syncMessages(withErr, convId);
+          return withErr;
+        });
+      }
     } finally {
-      setLoading(false);
-      inputRef.current?.focus();
+      setIsLoading(false);
+      setIsStreaming(false);
+      abortRef.current = null;
+      setTimeout(() => inputRef.current?.focus(), 50);
     }
   };
 
-  const handleReact = (idx, emoji) => {
-    setMessages((prev) => prev.map((m, i) => {
-      if (i !== idx) return m;
-      const r = m.reactions || [];
-      return { ...m, reactions: r.includes(emoji) ? r.filter((x) => x !== emoji) : [...r, emoji] };
-    }));
+  const stopGeneration = () => {
+    abortRef.current?.abort();
   };
 
+  const regenerate = () => {
+    // Find last user message
+    const userMsgs = messages.filter((m) => m.role === 'user');
+    if (userMsgs.length === 0) return;
+    const lastUserMsg = userMsgs[userMsgs.length - 1];
+    // Remove last assistant message if present
+    const trimmed = messages[messages.length - 1]?.role === 'assistant'
+      ? messages.slice(0, -1) : messages;
+    setMessages(trimmed);
+    sendMessage(lastUserMsg.content);
+  };
+
+  /* ─── Input Handlers ──────────────────────────────────────────── */
   const handleInput = (e) => {
     setInput(e.target.value);
     setCharCount(e.target.value.length);
-    e.target.style.height = "auto";
-    e.target.style.height = Math.min(e.target.scrollHeight, 120) + "px";
+    e.target.style.height = 'auto';
+    e.target.style.height = Math.min(e.target.scrollHeight, 130) + 'px';
   };
 
-  const suggestions = [
-    { icon: "🎲", text: "Tell me something surprising" },
-    { icon: "💡", text: "Give me a creative idea" },
-    { icon: "🌍", text: "Explain quantum physics simply" },
-    { icon: "✍️", text: "Write a haiku about AI" },
-  ];
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
 
+  /* ─── Derived ─────────────────────────────────────────────────── */
+  const totalMessages = conversations.reduce((s, c) => s + c.messages.length, 0);
+  const currentConv   = conversations.find((c) => c.id === activeId);
+
+  /* ─── Render ──────────────────────────────────────────────────── */
   return (
     <>
       <Head>
-        <title>Nova — AI Assistant</title>
-        <meta name="description" content="Nova: Your intelligent AI companion powered by Groq" />
+        <title>Nova — Premium AI Assistant</title>
+        <meta name="description" content="Nova: Your intelligent AI companion powered by Groq. Premium chat experience with streaming responses." />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✦</text></svg>" />
+        <link
+          rel="icon"
+          href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✦</text></svg>"
+        />
       </Head>
 
-      <div style={{
-        minHeight: "100vh", background: "#080b14",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        padding: 16, position: "relative", overflow: "hidden",
-      }}>
+      <AuroraBackground />
 
-        {/* Background orbs */}
-        <div style={{ position: "fixed", inset: 0, pointerEvents: "none", overflow: "hidden" }}>
-          <div style={{ position: "absolute", width: 500, height: 500, borderRadius: "50%", background: "radial-gradient(circle, rgba(245,158,11,0.08) 0%, transparent 70%)", top: "-10%", left: "-10%", animation: "orb1 12s ease-in-out infinite" }} />
-          <div style={{ position: "absolute", width: 400, height: 400, borderRadius: "50%", background: "radial-gradient(circle, rgba(239,68,68,0.07) 0%, transparent 70%)", bottom: "-5%", right: "-5%", animation: "orb2 10s ease-in-out infinite" }} />
-          <div style={{ position: "absolute", width: 300, height: 300, borderRadius: "50%", background: "radial-gradient(circle, rgba(37,99,235,0.06) 0%, transparent 70%)", top: "40%", right: "20%", animation: "orb1 15s ease-in-out 3s infinite" }} />
-          <div style={{ position: "absolute", inset: 0, backgroundImage: "linear-gradient(rgba(255,255,255,0.018) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.018) 1px, transparent 1px)", backgroundSize: "44px 44px" }} />
-        </div>
+      <div className="nova-layout">
+        {/* ── Sidebar ── */}
+        <AnimatePresence initial={false}>
+          {sidebarOpen && (
+            <Sidebar
+              isOpen={sidebarOpen}
+              conversations={conversations}
+              activeId={activeId}
+              searchQuery={searchQuery}
+              onNew={createNewChat}
+              onSelect={selectConversation}
+              onDelete={deleteConversation}
+              onRename={renameConversation}
+              onSettings={() => setShowSettings(true)}
+              onSearch={setSearchQuery}
+              onClose={() => setSidebarOpen(false)}
+            />
+          )}
+        </AnimatePresence>
 
-        {/* Chat window */}
-        <div style={{
-          width: "100%", maxWidth: 700, height: "90vh",
-          display: "flex", flexDirection: "column",
-          background: "rgba(8,11,20,0.88)",
-          border: "1px solid rgba(245,158,11,0.18)",
-          borderRadius: 22, overflow: "hidden",
-          backdropFilter: "blur(28px)",
-          boxShadow: "0 0 0 1px rgba(255,255,255,0.04), 0 32px 90px rgba(0,0,0,0.75), 0 0 100px rgba(245,158,11,0.05)",
-          position: "relative",
-        }}>
-
+        {/* ── Chat Area ── */}
+        <div className="chat-area">
           {/* Header */}
-          <div style={{ padding: "16px 22px", borderBottom: "1px solid rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.02)", display: "flex", alignItems: "center", gap: 14 }}>
-            <div style={{ position: "relative" }}>
-              <div style={{ width: 46, height: 46, borderRadius: 14, background: "linear-gradient(135deg, #f59e0b, #ef4444)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, boxShadow: "0 0 24px rgba(245,158,11,0.4)" }}>✦</div>
-              <div style={{ position: "absolute", bottom: -2, right: -2, width: 12, height: 12, borderRadius: "50%", background: "#22c55e", border: "2px solid #080b14", animation: "pulse 2.5s ease-in-out infinite" }} />
+          <div className="chat-header">
+            <button
+              className="chat-header-toggle"
+              onClick={() => setSidebarOpen((v) => !v)}
+              title="Toggle sidebar"
+            >
+              ☰
+            </button>
+
+            <div className="chat-header-avatar">✦</div>
+
+            <div className="chat-header-info">
+              <div className="chat-header-name">
+                {currentConv?.title && currentConv.title !== 'New Chat'
+                  ? currentConv.title
+                  : 'Nova'}
+              </div>
+              <div className="chat-header-sub">
+                Powered by Groq ⚡ · llama-3.3-70b-versatile
+              </div>
             </div>
-            <div>
-              <div style={{ color: "#fef3c7", fontWeight: 700, fontSize: 18 }}>Nova</div>
-              <div style={{ color: "rgba(255,255,255,0.3)", fontSize: 12 }}>AI Assistant · Powered by Groq ⚡</div>
-            </div>
-            <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
-              {messages.length > 0 && (
-                <div style={{ background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.2)", borderRadius: 20, padding: "4px 10px", color: "#f59e0b", fontSize: 12 }}>
-                  {messages.length} msg{messages.length !== 1 ? "s" : ""}
-                </div>
-              )}
-              {messages.length > 0 && !showClearConfirm && (
-                <button onClick={() => setShowClearConfirm(true)} style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 8, padding: "6px 12px", color: "#f87171", fontSize: 12, cursor: "pointer" }}
-                  onMouseEnter={(e) => e.currentTarget.style.background = "rgba(239,68,68,0.2)"}
-                  onMouseLeave={(e) => e.currentTarget.style.background = "rgba(239,68,68,0.08)"}
-                >🗑 Clear</button>
-              )}
-              {showClearConfirm && (
-                <div style={{ display: "flex", gap: 6 }}>
-                  <button onClick={() => { setMessages([]); setShowClearConfirm(false); }} style={{ background: "rgba(239,68,68,0.2)", border: "1px solid rgba(239,68,68,0.4)", borderRadius: 8, padding: "6px 10px", color: "#f87171", fontSize: 12, cursor: "pointer" }}>Sure?</button>
-                  <button onClick={() => setShowClearConfirm(false)} style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, padding: "6px 10px", color: "rgba(255,255,255,0.5)", fontSize: 12, cursor: "pointer" }}>Nah</button>
-                </div>
-              )}
-            </div>
+
+            <div className="chat-header-status" title="Online" />
+
+            {messages.length > 0 && (
+              <div className="msg-count-badge">
+                {messages.length} msg{messages.length !== 1 ? 's' : ''}
+              </div>
+            )}
           </div>
 
           {/* Messages */}
-          <div style={{ flex: 1, overflowY: "auto", padding: "24px 20px" }}>
-            {messages.length === 0 && (
-              <div style={{ textAlign: "center", paddingTop: 30, animation: "fadeIn 0.4s ease" }}>
-                <div style={{ width: 72, height: 72, borderRadius: 22, margin: "0 auto 20px", background: "linear-gradient(135deg, #f59e0b, #ef4444)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 34, boxShadow: "0 0 40px rgba(245,158,11,0.3)" }}>✦</div>
-                <div style={{ color: "#fef3c7", fontSize: 24, fontWeight: 700, marginBottom: 8 }}>Hey, I'm Nova ✦</div>
-                <div style={{ color: "rgba(255,255,255,0.35)", fontSize: 14, marginBottom: 32, lineHeight: 1.7 }}>
-                  Sharp, curious, and always ready to help.<br />What&apos;s on your mind?
-                </div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 10, justifyContent: "center" }}>
-                  {suggestions.map((s) => (
-                    <button key={s.text} className="sug-btn"
-                      onClick={() => { setInput(s.text); setCharCount(s.text.length); inputRef.current?.focus(); }}
-                      style={{ padding: "10px 16px", background: "rgba(245,158,11,0.06)", border: "1px solid rgba(245,158,11,0.2)", borderRadius: 12, color: "#fcd34d", fontSize: 13, cursor: "pointer", transition: "all 0.2s", display: "flex", alignItems: "center", gap: 8 }}>
-                      <span>{s.icon}</span> {s.text}
-                    </button>
+          <div className="messages-area" id="messages-scroll">
+            {messages.length === 0 ? (
+              <motion.div
+                className="welcome-screen"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ duration: 0.5 }}
+              >
+                <div className="welcome-icon">✦</div>
+                <h1 className="welcome-title">Hey, I'm Nova ✦</h1>
+                <p className="welcome-sub">
+                  Sharp, curious, and always ready to help.<br />
+                  What's on your mind?
+                </p>
+                <div className="suggestions-grid">
+                  {SUGGESTIONS.map((s) => (
+                    <motion.button
+                      key={s.text}
+                      className="suggestion-card"
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => {
+                        setInput(s.text);
+                        setCharCount(s.text.length);
+                        inputRef.current?.focus();
+                      }}
+                    >
+                      <span className="suggestion-icon">{s.icon}</span>
+                      <span className="suggestion-text">{s.text}</span>
+                    </motion.button>
                   ))}
                 </div>
-              </div>
+              </motion.div>
+            ) : (
+              <AnimatePresence initial={false}>
+                {messages.map((msg, i) => (
+                  <MessageBubble
+                    key={msg.id || i}
+                    msg={msg}
+                    isNew={i === newMsgIdx}
+                    isStreaming={isStreaming}
+                    isLast={i === messages.length - 1}
+                    onRegenerate={i === messages.length - 1 ? regenerate : undefined}
+                  />
+                ))}
+              </AnimatePresence>
             )}
 
-            {messages.map((msg, i) => (
-              <Message key={i} msg={msg} isNew={i === newMsgIdx} onReact={(emoji) => handleReact(i, emoji)} />
-            ))}
+            {/* Typing indicator (before stream starts) */}
+            <AnimatePresence>
+              {isLoading && !isStreaming && <TypingIndicator />}
+            </AnimatePresence>
 
-            {loading && (
-              <div style={{ display: "flex", alignItems: "flex-end", gap: 10, animation: "msgIn 0.3s ease" }}>
-                <div style={{ width: 34, height: 34, borderRadius: "50%", flexShrink: 0, background: "linear-gradient(135deg, #f59e0b, #ef4444)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, boxShadow: "0 0 16px rgba(245,158,11,0.4)" }}>✦</div>
-                <div style={{ background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "18px 18px 18px 4px", backdropFilter: "blur(12px)" }}>
-                  <TypingDots />
-                </div>
-              </div>
-            )}
-            <div ref={bottomRef} />
+            <div ref={bottomRef} style={{ height: 1 }} />
           </div>
 
           {/* Input */}
-          <div style={{ padding: "14px 18px", borderTop: "1px solid rgba(255,255,255,0.06)", background: "rgba(255,255,255,0.015)" }}>
-            <div style={{
-              display: "flex", gap: 10, alignItems: "flex-end",
-              background: "rgba(255,255,255,0.05)",
-              border: `1px solid ${charCount > MAX_CHARS ? "rgba(239,68,68,0.5)" : "rgba(245,158,11,0.2)"}`,
-              borderRadius: 14, padding: "10px 12px", transition: "border-color 0.2s",
-            }}>
+          <div className="input-area">
+            <div className="input-wrap">
               <textarea
                 ref={inputRef}
+                id="chat-input"
+                className="input-textarea"
                 value={input}
                 onChange={handleInput}
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
-                placeholder="Ask Nova anything..."
+                onKeyDown={handleKeyDown}
+                placeholder="Ask Nova anything…"
                 rows={1}
-                style={{ flex: 1, background: "transparent", border: "none", color: "#f8fafc", fontSize: 14, lineHeight: 1.55, maxHeight: 120, overflowY: "auto", fontFamily: "inherit" }}
+                disabled={isLoading}
               />
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5, flexShrink: 0 }}>
+
+              <div className="input-right">
                 {input.length > 0 && (
-                  <span style={{ fontSize: 10, color: charCount > MAX_CHARS ? "#f87171" : "rgba(255,255,255,0.2)", letterSpacing: 0.3 }}>{charCount}/{MAX_CHARS}</span>
+                  <span className={`char-counter${charCount > MAX_CHARS ? ' over' : ''}`}>
+                    {charCount}/{MAX_CHARS}
+                  </span>
                 )}
-                <button className="send-btn"
-                  onClick={sendMessage}
-                  disabled={!input.trim() || loading || charCount > MAX_CHARS}
-                  style={{
-                    width: 38, height: 38, borderRadius: 11, border: "none",
-                    background: input.trim() && !loading && charCount <= MAX_CHARS ? "linear-gradient(135deg, #f59e0b, #ef4444)" : "rgba(255,255,255,0.08)",
-                    cursor: input.trim() && !loading ? "pointer" : "not-allowed",
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    fontSize: loading ? 15 : 18, transition: "all 0.2s", color: "#fff",
-                    boxShadow: input.trim() && !loading ? "0 0 20px rgba(245,158,11,0.35)" : "none",
-                  }}>
-                  {loading
-                    ? <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>⟳</span>
-                    : "↑"}
-                </button>
+
+                {isStreaming ? (
+                  <motion.button
+                    className="stop-btn"
+                    onClick={stopGeneration}
+                    title="Stop generation"
+                    whileTap={{ scale: 0.9 }}
+                  >
+                    ■
+                  </motion.button>
+                ) : (
+                  <motion.button
+                    id="send-btn"
+                    className="send-btn"
+                    onClick={() => sendMessage()}
+                    disabled={!input.trim() || isLoading || charCount > MAX_CHARS}
+                    title="Send message"
+                    whileHover={{ scale: 1.06 }}
+                    whileTap={{ scale: 0.93 }}
+                  >
+                    {isLoading
+                      ? <span style={{ animation: 'spin 1s linear infinite', display: 'inline-block' }}>⟳</span>
+                      : '↑'}
+                  </motion.button>
+                )}
               </div>
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 9, paddingInline: 2 }}>
-              <span style={{ color: "rgba(255,255,255,0.15)", fontSize: 11 }}>Shift + Enter for new line</span>
-              <span style={{ color: "rgba(255,255,255,0.15)", fontSize: 11 }}>Nova · Powered by Groq ⚡</span>
+
+            <div className="input-footer">
+              <span className="input-hint">Shift + Enter for new line</span>
+              <span className="input-hint">Nova · Groq ⚡</span>
             </div>
           </div>
         </div>
       </div>
+
+      {/* Settings Modal */}
+      <AnimatePresence>
+        {showSettings && (
+          <SettingsModal
+            onClose={() => setShowSettings(false)}
+            onClearAll={clearAll}
+            totalConversations={conversations.length}
+            totalMessages={totalMessages}
+          />
+        )}
+      </AnimatePresence>
     </>
   );
 }
