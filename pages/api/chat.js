@@ -101,8 +101,23 @@ export default async function handler(req) {
     });
 
   } catch (error) {
-    console.error("[Nova] Error processing request:", error);
-    return new Response(JSON.stringify({ error: "API error." }), {
+    console.error("[Nova] Error processing request:", error?.message || error);
+
+    // Distinguish error types for easier diagnosis
+    const message = error?.message || "";
+    const isAuthError = message.includes("401") || message.includes("api_key") || message.includes("authentication") || message.includes("Unauthorized");
+    const isRateLimit = message.includes("429") || message.includes("rate_limit");
+    const isModelError = message.includes("model") || message.includes("404");
+
+    const errorBody = isAuthError
+      ? { error: "Invalid or missing GROQ_API_KEY. Check Vercel environment variables.", code: "AUTH_ERROR" }
+      : isRateLimit
+      ? { error: "Groq rate limit reached. Please try again in a moment.", code: "RATE_LIMIT" }
+      : isModelError
+      ? { error: "Groq model error. The requested model may be unavailable.", code: "MODEL_ERROR" }
+      : { error: "Groq API error. Please try again.", code: "API_ERROR", detail: message.slice(0, 120) };
+
+    return new Response(JSON.stringify(errorBody), {
       status: 500,
       headers: { "Content-Type": "application/json" }
     });
