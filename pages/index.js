@@ -82,7 +82,9 @@ export default function Home() {
   const [isLoading,     setIsLoading]     = useState(false);
   const [isStreaming,   setIsStreaming]   = useState(false);
   const [newMsgIdx,     setNewMsgIdx]     = useState(null);
-  const [sidebarOpen,   setSidebarOpen]   = useState(true);
+  // Start hidden to avoid SSR/hydration mismatch — set correctly in useEffect
+  const [sidebarOpen,   setSidebarOpen]   = useState(false);
+  const [mounted,       setMounted]       = useState(false);
   const [showSettings,  setShowSettings]  = useState(false);
   const [searchQuery,   setSearchQuery]   = useState('');
   const [charCount,     setCharCount]     = useState(0);
@@ -94,7 +96,7 @@ export default function Home() {
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
 
-  /* ── Load from localStorage ── */
+  /* ── Load from localStorage + resolve sidebar state client-side ── */
   useEffect(() => {
     const saved = loadConversations();
     setConversations(saved);
@@ -102,8 +104,8 @@ export default function Home() {
       setActiveId(saved[0].id);
       setMessages(saved[0].messages);
     }
-    // Default sidebar open on desktop, closed on mobile
     setSidebarOpen(window.innerWidth >= 768);
+    setMounted(true);
   }, []);
 
   /* ── Persist to localStorage ── */
@@ -181,9 +183,11 @@ export default function Home() {
   };
 
   /* ─── Send / Stream ───────────────────────────────────────────── */
-  const sendMessage = async (overrideText) => {
+  const sendMessage = async (overrideText, msgsOverride) => {
     const text = (overrideText !== undefined ? overrideText : input).trim();
-    if (!text || isLoading || charCount > MAX_CHARS) return;
+    // Skip charCount guard for programmatic calls (override) — only applies to textarea
+    if (!text || isLoading) return;
+    if (overrideText === undefined && charCount > MAX_CHARS) return;
 
     // Ensure there's an active conversation
     let convId = activeId;
@@ -200,7 +204,7 @@ export default function Home() {
       time: Date.now(),
     };
 
-    const updatedMsgs = [...messagesRef.current, userMsg];
+    const updatedMsgs = [...(msgsOverride ?? messagesRef.current), userMsg];
     setMessages(updatedMsgs);
     setNewMsgIdx(updatedMsgs.length - 1);
     setInput(''); setCharCount(0);
@@ -302,15 +306,20 @@ export default function Home() {
   };
 
   const regenerate = () => {
-    // Find last user message
-    const userMsgs = messages.filter((m) => m.role === 'user');
-    if (userMsgs.length === 0) return;
-    const lastUserMsg = userMsgs[userMsgs.length - 1];
-    // Remove last assistant message if present
-    const trimmed = messages[messages.length - 1]?.role === 'assistant'
-      ? messages.slice(0, -1) : messages;
-    setMessages(trimmed);
-    sendMessage(lastUserMsg.content);
+    const msgs = messagesRef.current;
+    if (msgs.length < 2) return;
+    // Must have an assistant message to regenerate
+    if (msgs[msgs.length - 1]?.role !== 'assistant') return;
+    // Trim the last assistant message
+    const withoutAssistant = msgs.slice(0, -1);
+    const lastUser = withoutAssistant[withoutAssistant.length - 1];
+    if (!lastUser || lastUser.role !== 'user') return;
+    // Context sent to API = everything before the last user message
+    const context = withoutAssistant.slice(0, -1);
+    // Update UI immediately (show conversation without last assistant reply)
+    setMessages(withoutAssistant);
+    // Re-send the last user message with the correct context
+    sendMessage(lastUser.content, context);
   };
 
   /* ─── Input Handlers ──────────────────────────────────────────── */
@@ -348,9 +357,9 @@ export default function Home() {
       <AuroraBackground />
 
       <div className="nova-layout">
-        {/* ── Sidebar ── */}
+        {/* ── Sidebar ── mounted guard prevents SSR hydration mismatch */}
         <AnimatePresence initial={false}>
-          {sidebarOpen && (
+          {mounted && sidebarOpen && (
             <Sidebar
               isOpen={sidebarOpen}
               conversations={conversations}

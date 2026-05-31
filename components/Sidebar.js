@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 
 const sidebarVariants = {
   open:   { x: 0,    opacity: 1, transition: { type: 'spring', damping: 28, stiffness: 220 } },
-  closed: { x: -280, opacity: 0, transition: { type: 'spring', damping: 28, stiffness: 220 } },
+  closed: { x: -260, opacity: 0, transition: { type: 'spring', damping: 28, stiffness: 220 } },
 };
 
 export default function Sidebar({
@@ -58,9 +58,12 @@ export default function Sidebar({
 
       {/* Sidebar panel */}
       <motion.div
-        className={`sidebar${isOpen ? ' open' : ''}`}
-        variants={sidebarVariants}
-        initial={false}
+        className="sidebar"
+        key="sidebar-panel"
+        initial={{ x: -260, opacity: 0 }}
+        animate={{ x: 0, opacity: 1 }}
+        exit={{ x: -260, opacity: 0 }}
+        transition={{ type: 'spring', damping: 28, stiffness: 220 }}
         style={{ zIndex: 50 }}
       >
         {/* Header */}
