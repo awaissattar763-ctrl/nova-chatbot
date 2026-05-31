@@ -4,6 +4,8 @@ export const config = {
   runtime: 'edge',
 };
 
+const VALID_ROLES = new Set(["user", "assistant"]);
+
 const SYSTEM_PROMPT = `You are Nova — a razor-sharp, witty, and warm AI assistant with a distinct personality. You're confident but never arrogant, funny but never silly, and deeply knowledgeable across all domains.
 
 Your style:
@@ -28,45 +30,101 @@ export default async function handler(req) {
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "Method not allowed" }), {
       status: 405,
-      headers: { "Content-Type": "application/json" }
+      headers: { "Content-Type": "application/json" },
     });
   }
 
+  // ── 1. Validate API key ──────────────────────────────────────────────────
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
-    console.error("[Nova] Missing GROQ_API_KEY environment variable");
-    return new Response(JSON.stringify({ error: "API configuration error on server" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" }
-    });
+    console.error("[Nova] MISSING GROQ_API_KEY — set it in Vercel environment variables");
+    return new Response(
+      JSON.stringify({ error: "Server misconfiguration: GROQ_API_KEY not set", code: "NO_API_KEY" }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
   }
 
-  const groq = new Groq({ 
-    apiKey,
-    maxRetries: 3 
-  });
+  // ── 2. Parse request body ────────────────────────────────────────────────
+  let body;
+  try {
+    body = await req.json();
+  } catch (e) {
+    console.error("[Nova] Failed to parse request body:", e?.message);
+    return new Response(
+      JSON.stringify({ error: "Invalid JSON in request body", code: "BAD_REQUEST" }),
+      { status: 400, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  const { messages } = body;
+
+  // ── 3. Validate messages array ───────────────────────────────────────────
+  if (!messages || !Array.isArray(messages)) {
+    return new Response(
+      JSON.stringify({ error: "messages must be an array", code: "INVALID_MESSAGES" }),
+      { status: 400, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  // ── 4. Sanitize: keep only valid messages ────────────────────────────────
+  //   - must have a valid role (user | assistant)
+  //   - content must be a non-empty string
+  const sanitized = messages
+    .filter((m) => {
+      if (!m || typeof m !== "object") return false;
+      if (!VALID_ROLES.has(m.role)) {
+        console.warn("[Nova] Dropping message with invalid role:", m.role);
+        return false;
+      }
+      if (m.content === null || m.content === undefined) {
+        console.warn("[Nova] Dropping message with null/undefined content, role:", m.role);
+        return false;
+      }
+      if (typeof m.content !== "string" || m.content.trim() === "") {
+        console.warn("[Nova] Dropping message with empty content, role:", m.role);
+        return false;
+      }
+      return true;
+    })
+    .map((m) => ({ role: m.role, content: m.content.trim() }));
+
+  if (sanitized.length === 0) {
+    return new Response(
+      JSON.stringify({ error: "No valid messages after sanitization", code: "EMPTY_MESSAGES" }),
+      { status: 400, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  if (sanitized.length > 50) {
+    return new Response(
+      JSON.stringify({ error: "Too many messages (max 50)", code: "TOO_MANY_MESSAGES" }),
+      { status: 400, headers: { "Content-Type": "application/json" } }
+    );
+  }
+
+  // ── 5. Build final Groq payload ──────────────────────────────────────────
+  const groqMessages = [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...sanitized,
+  ];
+
+  console.log("[Nova] Groq payload →", JSON.stringify({
+    model: "llama-3.3-70b-versatile",
+    message_count: groqMessages.length,
+    messages: groqMessages.map((m) => ({
+      role: m.role,
+      content_length: m.content.length,
+      content_preview: m.content.slice(0, 80),
+    })),
+  }));
+
+  // ── 6. Call Groq ─────────────────────────────────────────────────────────
+  const groq = new Groq({ apiKey, maxRetries: 2 });
 
   try {
-    const body = await req.json();
-    const { messages } = body;
-
-    console.log("[Nova] Incoming request with", messages?.length, "messages");
-
-    if (!messages || !Array.isArray(messages) || messages.length === 0 || messages.length > 50) {
-      return new Response(JSON.stringify({ error: "Invalid messages array" }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-
-    console.time("[Nova] GroqAPI_Latency");
-
     const completionStream = await groq.chat.completions.create({
       model: "llama-3.3-70b-versatile",
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        ...messages.map(m => ({ role: m.role, content: m.content })),
-      ],
+      messages: groqMessages,
       max_tokens: 1024,
       temperature: 0.75,
       stream: true,
@@ -83,43 +141,53 @@ export default async function handler(req) {
             }
           }
           controller.close();
-        } catch (error) {
-          console.error("[Nova] Stream generation error:", error);
-          controller.error(error);
-        } finally {
-          console.timeEnd("[Nova] GroqAPI_Latency");
+        } catch (streamErr) {
+          console.error("[Nova] Stream error:", streamErr?.message || streamErr);
+          controller.error(streamErr);
         }
-      }
+      },
     });
 
     return new Response(readable, {
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
         "Cache-Control": "no-cache",
-        "Connection": "keep-alive",
-      }
+        "X-Content-Type-Options": "nosniff",
+      },
     });
 
   } catch (error) {
-    console.error("[Nova] Error processing request:", error?.message || error);
+    // ── 7. Capture exact Groq error ────────────────────────────────────────
+    console.error("[Nova] Groq API error — status:", error?.status);
+    console.error("[Nova] Groq API error — message:", error?.message);
+    console.error("[Nova] Groq API error — headers:", JSON.stringify(error?.headers || {}));
 
-    // Distinguish error types for easier diagnosis
-    const message = error?.message || "";
-    const isAuthError = message.includes("401") || message.includes("api_key") || message.includes("authentication") || message.includes("Unauthorized");
-    const isRateLimit = message.includes("429") || message.includes("rate_limit");
-    const isModelError = message.includes("model") || message.includes("404");
+    // Try to extract the raw Groq error body
+    let groqDetail = null;
+    try {
+      groqDetail = error?.error || error?.body || null;
+    } catch (_) {}
 
-    const errorBody = isAuthError
-      ? { error: "Invalid or missing GROQ_API_KEY. Check Vercel environment variables.", code: "AUTH_ERROR" }
-      : isRateLimit
-      ? { error: "Groq rate limit reached. Please try again in a moment.", code: "RATE_LIMIT" }
-      : isModelError
-      ? { error: "Groq model error. The requested model may be unavailable.", code: "MODEL_ERROR" }
-      : { error: "Groq API error. Please try again.", code: "API_ERROR", detail: message.slice(0, 120) };
+    console.error("[Nova] Groq error detail:", JSON.stringify(groqDetail));
 
-    return new Response(JSON.stringify(errorBody), {
-      status: 500,
-      headers: { "Content-Type": "application/json" }
-    });
+    const status = error?.status || 500;
+    const msg = error?.message || "";
+
+    const code =
+      status === 400 ? "GROQ_BAD_REQUEST" :
+      status === 401 ? "GROQ_AUTH_ERROR" :
+      status === 429 ? "GROQ_RATE_LIMIT" :
+      status === 404 ? "GROQ_MODEL_NOT_FOUND" :
+      "GROQ_API_ERROR";
+
+    return new Response(
+      JSON.stringify({
+        error: `Groq returned ${status}: ${msg.slice(0, 200)}`,
+        code,
+        groq_detail: groqDetail,
+        status,
+      }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
   }
 }
